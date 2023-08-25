@@ -1,0 +1,7 @@
+node_modules
+# Keep environment variables out of version control
+.env
+# remove intelij files
+.idea
+# remove vscode files
+.vscode
