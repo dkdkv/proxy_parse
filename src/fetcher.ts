@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { Product, Proxy } from '@prisma/client';
-import {URL_TEMPLATE, TIMEOUT, MAX_RETRIES, PROXY_COOLDOWN, MAX_REQUESTS_PER_PROXY} from './config';
-import {prisma} from "./db";
+import { URL_TEMPLATE, TIMEOUT, MAX_RETRIES, PROXY_COOLDOWN, MAX_REQUESTS_PER_PROXY } from './config';
+import { prisma } from "./db";
+import pLimit from 'p-limit';
 
 export async function fetchData(articleId: number, proxy: Proxy): Promise<Product | null> {
     let retries = 0;
@@ -39,37 +40,43 @@ export async function fetchData(articleId: number, proxy: Proxy): Promise<Produc
 export async function fetchWithProxyRotation(articleIds: number[]) {
     const proxies = await prisma.proxy.findMany();
     let proxyIndex = 0;
+    let requestsOnCurrentProxy = 0;
     type ServerResponse = Product & {
         images?: any[];
     };
 
-    for (let i = 0; i < articleIds.length; i += MAX_REQUESTS_PER_PROXY) {
-        const currentIds = articleIds.slice(i, i + MAX_REQUESTS_PER_PROXY);
+    const limit = pLimit(MAX_REQUESTS_PER_PROXY);
 
-        const promises = currentIds.map(async (articleId) => {
-            const data: ServerResponse | null = await fetchData(articleId, proxies[proxyIndex]);
+    const tasks = articleIds.map((articleId) => limit(async () => {
+        const data: ServerResponse | null = await fetchData(articleId, proxies[proxyIndex]);
 
-            if (data) {
-                try {
-                    const { images, id: productId, ...dataWithoutId } = data;
-                    await prisma.product.create({
-                        data: {
-                            ...dataWithoutId,
-                            productId: productId,
-                        },
-                    });
-                    console.log(`Inserted product for articleId: ${articleId}`);
-                } catch (error) {
-                    console.error(`Failed to insert product for articleId: ${articleId}. Error: ${error}`);
-                }
+        if (data) {
+            try {
+                const { images, id: productId, ...dataWithoutId } = data;
+                await prisma.product.create({
+                    data: {
+                        ...dataWithoutId,
+                        productId: productId,
+                    },
+                });
+                console.log(`Inserted product for articleId: ${articleId}`);
+            } catch (error) {
+                console.error(`Failed to insert product for articleId: ${articleId}. Error: ${error}`);
             }
-        });
-
-        await Promise.all(promises);
-        proxyIndex++;
-        if (proxyIndex >= proxies.length) {
-            proxyIndex = 0;
-            await new Promise(res => setTimeout(res, PROXY_COOLDOWN));
         }
-    }
+
+        requestsOnCurrentProxy++;
+        if (requestsOnCurrentProxy >= MAX_REQUESTS_PER_PROXY) {
+            proxyIndex++;
+            requestsOnCurrentProxy = 0;  // Reset the counter
+
+            if (proxyIndex >= proxies.length) {
+                proxyIndex = 0;  // Reset the proxy index
+            }
+
+            await new Promise(res => setTimeout(res, PROXY_COOLDOWN));  // Wait for the cooldown time
+        }
+    }));
+
+    await Promise.all(tasks);
 }
